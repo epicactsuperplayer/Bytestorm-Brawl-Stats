@@ -1,1 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BRAWL.STATS</title>
+<style>
+body{
+  background:#0a0a0a;
+  color:white;
+  font-family:Arial,sans-serif;
+  padding:40px;
+}
+input,button{
+  padding:12px;
+  border-radius:6px;
+  border:none;
+}
+button{
+  cursor:pointer;
+}
+.card{
+  background:#111;
+  padding:20px;
+  margin-top:20px;
+  border-radius:10px;
+}
+</style>
+</head>
+<body>
 
+<h1>BRAWL.STATS</h1>
+
+<input id="tag" placeholder="#PLAYER_TAG">
+<button onclick="searchPlayer()">Search</button>
+
+<div id="result"></div>
+
+<script>
+async function apiFetch(path) {
+  let endpoint = '';
+  let tag = '';
+
+  if (path.includes('/players/') && path.includes('/battlelog')) {
+    endpoint = '/api/battlelog';
+    tag = path.split('/players/')[1].split('/battlelog')[0];
+  }
+  else if (path.includes('/players/')) {
+    endpoint = '/api/player';
+    tag = path.split('/players/')[1];
+  }
+  else if (path.includes('/clubs/')) {
+    endpoint = '/api/club';
+    tag = path.split('/clubs/')[1];
+  }
+
+  const response = await fetch(`${endpoint}?tag=${tag}`);
+  const data = await response.json();
+
+  if (!response.ok) {
+    throw new Error(data.reason || data.message || data.error || 'API Error');
+  }
+
+  return data;
+}
+
+function normalizeTag(t) {
+  return encodeURIComponent(t.trim().toUpperCase().replace(/^#?/, '#'));
+}
+
+async function searchPlayer() {
+  const tag = document.getElementById('tag').value;
+
+  if (!tag) return;
+
+  const result = document.getElementById('result');
+  result.innerHTML = 'Loading...';
+
+  try {
+    const player = await apiFetch('/players/' + normalizeTag(tag));
+
+    result.innerHTML = `
+      <div class="card">
+        <h2>${player.name}</h2>
+        <p>${player.tag}</p>
+        <p>Trophies: ${player.trophies}</p>
+        <p>Highest Trophies: ${player.highestTrophies}</p>
+        <p>XP Level: ${player.expLevel}</p>
+      </div>
+    `;
+  } catch (e) {
+    result.innerHTML = `<div class="card">Error: ${e.message}</div>`;
+  }
+}
+</script>
+
+</body>
+</html>

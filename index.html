@@ -770,8 +770,7 @@
 </main>
 
 <script>
-const TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzUxMiIsImtpZCI6IjI4YTMxOGY3LTAwMDAtYTFlYi03ZmExLTJjNzQzM2M2Y2NhNSJ9.eyJpc3MiOiJzdXBlcmNlbGwiLCJhdWQiOiJzdXBlcmNlbGw6Z2FtZWFwaSIsImp0aSI6ImZlYjFiN2U3LTBhYWUtNGU1MC05MDcxLWIyZjNlNTdiZTllYyIsImlhdCI6MTc3ODE2NjM0Miwic3ViIjoiZGV2ZWxvcGVyLzVkMTY2YTI5LWExOWEtOTA1NC05ZjZkLTNmYzUzMWI2YzAwNiIsInNjb3BlcyI6WyJicmF3bHN0YXJzIl0sImxpbWl0cyI6W3sidGllciI6ImRldmVsb3Blci9zaWx2ZXIiLCJ0eXBlIjoidGhyb3R0bGluZyJ9LHsiY2lkcnMiOlsiMjU1LjI1NS4yNDAuMCJdLCJ0eXBlIjoiY2xpZW50In1dfQ.MGYUCATrch3jGLH4cW1Kp-EDdZZDtxlaZBgbJinc2NSlTVOII1yHxa6IdQDqk7n_sXRKRmi6jPudWtJQ4kzzs";
-const PROXY = "https://corsproxy.io/?";
+const TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzUxMiIsImtpZCI6IjI4YTMxOGY3LTAwMDAtYTFlYi03ZmExLTJjNzQzM2M2Y2NhNSJ9.eyJpc3MiOiJzdXBlcmNlbGwiLCJhdWQiOiJzdXBlcmNlbGw6Z2FtZWFwaSIsImp0aSI6ImY0Y2I4ZWJjLTg5YmMtNDExMS1hYmNiLWM3MmMwYmY0MDU1ZCIsImlhdCI6MTc3ODE2NzA0Niwic3ViIjoiZGV2ZWxvcGVyLzVkMTY2YTI5LWExOWEtOTA1NC05ZjZkLTNmYzUzMWI2YzAwNiIsInNjb3BlcyI6WyJicmF3bHN0YXJzIl0sImxpbWl0cyI6W3sidGllciI6ImRldmVsb3Blci9zaWx2ZXIiLCJ0eXBlIjoidGhyb3R0bGluZyJ9LHsiY2lkcnMiOlsiMTYyLjEyMC4xODcuMTAwIl0sInR5cGUiOiJjbGllbnQifV19.w4LgsXZr1yAouPJyUaj5Aq6TiV5u-yYyOYo-52KI87MDStHm0zdiJM6J-atcedoJFNmg73KfTPnnpfYuUXnWWw";
 const API = "https://api.brawlstars.com/v1";
 
 let cmpType = 'player';
@@ -800,15 +799,49 @@ function normalizeTag(t) {
 }
 
 async function apiFetch(path) {
-  const url = PROXY + encodeURIComponent(API + path);
-  const res = await fetch(url, {
-    headers: { 'Authorization': 'Bearer ' + TOKEN }
+  const targetUrl = API + path;
+  const prompt = `Make a GET request to this URL and return ONLY the raw JSON response body, nothing else, no markdown, no explanation:
+URL: ${targetUrl}
+Authorization: Bearer ${TOKEN}
+
+Return only valid JSON.`;
+
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 8000,
+      tools: [{ type: "web_search_20250305", name: "web_search" }],
+      system: `You are an HTTP proxy. When given a URL and Authorization header, fetch that URL with the provided bearer token using your web_fetch capability and return ONLY the raw JSON response. No explanation, no markdown formatting, just the JSON object.`,
+      messages: [{ role: "user", content: prompt }]
+    })
   });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.reason || err.message || `HTTP ${res.status}`);
+
+  if (!res.ok) throw new Error(`Proxy error: HTTP ${res.status}`);
+  const data = await res.json();
+
+  // Extract text from response
+  const text = (data.content || [])
+    .filter(b => b.type === "text")
+    .map(b => b.text)
+    .join("");
+
+  // Strip markdown code fences if present
+  const clean = text.replace(/^```(?:json)?\n?/m, '').replace(/\n?```$/m, '').trim();
+
+  let parsed;
+  try {
+    parsed = JSON.parse(clean);
+  } catch(e) {
+    throw new Error("Could not parse API response");
   }
-  return res.json();
+
+  if (parsed.reason || parsed.message) {
+    throw new Error(parsed.reason || parsed.message);
+  }
+
+  return parsed;
 }
 
 function loading(msg = 'Loading...') {

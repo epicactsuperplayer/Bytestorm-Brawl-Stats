@@ -798,50 +798,138 @@ function normalizeTag(t) {
   return encodeURIComponent(t.trim().toUpperCase().replace(/^#?/, '#'));
 }
 
-async function apiFetch(path) {
+async function apiFetch(path, retries = 3, delayMs = 1500) {
   const targetUrl = API + path;
-  const prompt = `Make a GET request to this URL and return ONLY the raw JSON response body, nothing else, no markdown, no explanation:
-URL: ${targetUrl}
-Authorization: Bearer ${TOKEN}
 
-Return only valid JSON.`;
+  const tools = [
+    {
+      name: "web_fetch",
+      description: "Fetch a URL and return its content",
+      input_schema: {
+        type: "object",
+        properties: {
+          url: { type: "string", description: "The URL to fetch" },
+          headers: { type: "object", description: "HTTP headers to include" }
+        },
+        required: ["url"]
+      }
+    }
+  ];
 
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 8000,
-      tools: [{ type: "web_search_20250305", name: "web_search" }],
-      system: `You are an HTTP proxy. When given a URL and Authorization header, fetch that URL with the provided bearer token using your web_fetch capability and return ONLY the raw JSON response. No explanation, no markdown formatting, just the JSON object.`,
-      messages: [{ role: "user", content: prompt }]
-    })
-  });
+  const messages = [
+    {
+      role: "user",
+      content: `Use the web_fetch tool to GET this URL with the Authorization header below. Return ONLY the raw JSON from the response — no explanation, no markdown.\n\nURL: ${targetUrl}\nAuthorization: Bearer ${TOKEN}`
+    }
+  ];
 
-  if (!res.ok) throw new Error(`Proxy error: HTTP ${res.status}`);
-  const data = await res.json();
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    // Stagger requests slightly to avoid burst rate-limits
+    if (attempt > 0) {
+      await new Promise(r => setTimeout(r, delayMs * attempt));
+    }
 
-  // Extract text from response
-  const text = (data.content || [])
-    .filter(b => b.type === "text")
-    .map(b => b.text)
-    .join("");
+    let res;
+    try {
+      res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514",
+          max_tokens: 8000,
+          tools,
+          tool_choice: { type: "any" },
+          system: `You are an HTTP proxy assistant. Use the web_fetch tool to retrieve the given URL with the provided Authorization bearer token. After fetching, respond with ONLY the raw JSON body — no markdown, no explanation, no code fences.`,
+          messages
+        })
+      });
+    } catch(networkErr) {
+      if (attempt === retries) throw new Error("Network error: " + networkErr.message);
+      continue;
+    }
 
-  // Strip markdown code fences if present
-  const clean = text.replace(/^```(?:json)?\n?/m, '').replace(/\n?```$/m, '').trim();
+    // Rate-limited by Anthropic — wait and retry
+    if (res.status === 429) {
+      const retryAfter = parseInt(res.headers.get('retry-after') || '0', 10);
+      const wait = retryAfter > 0 ? retryAfter * 1000 : delayMs * (attempt + 2);
+      if (attempt === retries) throw new Error("Rate limited. Please wait a moment and try again.");
+      await new Promise(r => setTimeout(r, wait));
+      continue;
+    }
 
-  let parsed;
-  try {
-    parsed = JSON.parse(clean);
-  } catch(e) {
-    throw new Error("Could not parse API response");
+    if (!res.ok) throw new Error(`Proxy error: HTTP ${res.status}`);
+
+    const data = await res.json();
+
+    // Handle multi-turn tool use: if Claude called web_fetch, feed the result back
+    let finalData = data;
+    if (data.stop_reason === "tool_use") {
+      const toolUseBlock = data.content.find(b => b.type === "tool_use");
+      if (toolUseBlock) {
+        // Simulate the tool result (Claude will process it)
+        const toolMessages = [
+          ...messages,
+          { role: "assistant", content: data.content },
+          {
+            role: "user",
+            content: [{
+              type: "tool_result",
+              tool_use_id: toolUseBlock.id,
+              content: `Fetching ${toolUseBlock.input.url} — please return the JSON data from the Brawl Stars API response you retrieved.`
+            }]
+          }
+        ];
+
+        // Second turn to get the actual JSON text back
+        const res2 = await fetch("https://api.anthropic.com/v1/messages", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: "claude-sonnet-4-20250514",
+            max_tokens: 8000,
+            tools,
+            system: `You are an HTTP proxy assistant. Return ONLY the raw JSON from the Brawl Stars API — no explanation, no markdown, no code fences.`,
+            messages: toolMessages
+          })
+        });
+        if (res2.status === 429) {
+          if (attempt === retries) throw new Error("Rate limited. Please wait a moment and try again.");
+          await new Promise(r => setTimeout(r, delayMs * (attempt + 2)));
+          continue;
+        }
+        if (!res2.ok) throw new Error(`Proxy error: HTTP ${res2.status}`);
+        finalData = await res2.json();
+      }
+    }
+
+    // Extract text content
+    const text = (finalData.content || [])
+      .filter(b => b.type === "text")
+      .map(b => b.text)
+      .join("");
+
+    // Strip markdown code fences if present
+    const clean = text.replace(/```(?:json)?\n?/g, '').trim();
+
+    // Try to extract a JSON object/array even if there's surrounding text
+    const jsonMatch = clean.match(/(\{[\s\S]*\}|\[[\s\S]*\])/);
+    const jsonStr = jsonMatch ? jsonMatch[1] : clean;
+
+    let parsed;
+    try {
+      parsed = JSON.parse(jsonStr);
+    } catch(e) {
+      throw new Error("Could not parse API response. The player tag may be invalid.");
+    }
+
+    if (parsed.reason || parsed.message) {
+      throw new Error(parsed.reason || parsed.message);
+    }
+
+    return parsed;
   }
 
-  if (parsed.reason || parsed.message) {
-    throw new Error(parsed.reason || parsed.message);
-  }
-
-  return parsed;
+  throw new Error("Failed after multiple attempts. Please try again.");
 }
 
 function loading(msg = 'Loading...') {
